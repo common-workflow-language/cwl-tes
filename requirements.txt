@@ -5,3 +5,5 @@ requests>=2.18.2
 py-tes>=0.4.0
 PyJWT>=1.6.4
 typing_extensions>=3.7.4
+boto3>=1.12.24
+google-cloud-storage

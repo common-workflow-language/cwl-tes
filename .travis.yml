@@ -27,3 +27,10 @@ jobs:
         - make ftp-conformance
       env:
         - n=ftp
+    - script:
+        - make funnel
+        - make minio-server
+        - make funnel-minio-server
+        - make s3-conformance
+      env:
+        - n=s3

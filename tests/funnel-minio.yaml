@@ -1,0 +1,11 @@
+AmazonS3:
+  Disabled: true
+
+Logger:
+  OutputFile: funnel.logs
+
+GenericS3:
+  - Disabled: false
+    Endpoint: "http://localhost:9000"
+    Key: "minioadmin"
+    Secret: "minioadmin"

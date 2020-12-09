@@ -91,6 +91,12 @@ class FtpFsAccess(StdFsAccess):
     def _abs(self, p):  # type: (Text) -> Text
         return abspath(p, self.basedir)
 
+    def setUUID(self, uuid):
+        self.uuid = uuid
+
+    def getUUID(self):
+        return(self.uuid)
+
     def _recall_credentials(self, desired_host):
         for host, user, passwd in self.cache:
             if desired_host == host:

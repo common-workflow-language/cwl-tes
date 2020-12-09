@@ -6,10 +6,13 @@ import random
 import time
 import threading
 import stat
+import re
+import json
 from builtins import str
 import shutil
 import functools
 import uuid
+import inspect
 from tempfile import NamedTemporaryFile
 from pprint import pformat
 from typing import (Any, Callable, Dict, List, MutableMapping, MutableSequence,
@@ -29,6 +32,8 @@ from cwltool.errors import WorkflowException, UnsupportedRequirement
 from cwltool.expression import JSON
 from cwltool.job import JobBase
 from cwltool.stdfsaccess import StdFsAccess
+from cwl_tes.s3 import S3FsAccess
+
 from cwltool.pathmapper import (PathMapper, uri_file_path, MapperEnt,
                                 downloadHttpFile)
 from cwltool.utils import onWindows, convert_pathsep_to_unix
@@ -86,14 +91,60 @@ class TESPathMapper(PathMapper):
         super(TESPathMapper, self).__init__(reference_files, basedir, stagedir,
                                             separateDirs)
 
-    def _download_ftp_file(self, path):
-        with NamedTemporaryFile(mode='wb', delete=False) as dest:
-            with self.fs_access.open(path, mode="rb") as handle:
-                chunk = "start"
-                while chunk:
-                    chunk = handle.read(16384)
-                    dest.write(chunk)
+    @property
+    def getPathMapping(self):
+        return self._pathmap
+
+    def mapper(self, src: str) -> MapperEnt:
+
+        # find who called me:
+        st = inspect.stack()
+        callers = [st[i][3] for i, k in enumerate(st)]
+        if "#" in src:
+            i = src.index("#")
+            p = self._pathmap[src[:i]]
+            return MapperEnt(p.resolved, p.target + src[i:], p.type, p.staged)
+        pm = self._pathmap[src]
+
+        if 'relocateOutputs' in callers:
+            # leave this line to print out the URI of the file
+            # and its resolved location
+            # this output will be used at the end to map the
+            # output files back to their URIs
+            print("Mapper: {} ".format(
+                json.dumps({"resolved": pm.resolved,
+                            "target": pm.target,
+                            "target_uri": file_uri(pm.target)
+                            })
+                )
+            )
+
+        # at this point the _pathmap for an s3 object contains
+        # resolved: s3 URI
+        # target: location on local fs
+        # if we don't want to get the local file
+        # (because we let the objects remain on s3) we
+        # will replace the target with resolved
+        return pm
+
+    def _download_remote_file(self, path):
+        """ returns the file name of a local file
+            with the contents of the remote file.
+            If the file is an remote object we
+            don't need to download it, just return the URI"""
+        url = urllib.parse.urlparse(path)
+        if url.scheme in ['s3', 'ftp', 's3+http', 's3+https']:
+            return path
+        elif url.scheme == "" or url.scheme == 'file':
+            with NamedTemporaryFile(mode='wb', delete=False) as dest:
+                with self.fs_access.open(path, mode="rb") as handle:
+                    chunk = "start"
+                    while chunk:
+                        chunk = handle.read(16384)
+                        dest.write(chunk)
             return dest.name
+        else:
+            raise Exception("Unknown scheme for file {}".format(path))
 
     def visit(self, obj, stagedir, basedir, copy=False, staged=False):
         tgt = convert_pathsep_to_unix(
@@ -127,8 +178,8 @@ class TESPathMapper(PathMapper):
                     if urllib.parse.urlsplit(deref).scheme in [
                             'http', 'https']:
                         deref = downloadHttpFile(path)
-                    elif urllib.parse.urlsplit(deref).scheme == 'ftp':
-                        deref = self._download_ftp_file(path)
+                    elif urllib.parse.urlsplit(deref).scheme in ['ftp', 's3', 's3+http', 's3+https']:
+                        deref = self._download_remote_file(path)
                     else:
                         log.warning("unprocessed File %s", obj)
                         # Dereference symbolic links
@@ -160,7 +211,8 @@ class TESTask(JobBase):
                  url,
                  spec,
                  remote_storage_url=None,
-                 token=None):
+                 token=None,
+                 uuid=None):
         super(TESTask, self).__init__(builder, joborder, make_path_mapper,
                                       requirements, hints, name)
         self.runtime_context = runtime_context
@@ -176,7 +228,19 @@ class TESTask(JobBase):
         self.poll_interval = 1
         self.poll_retries = 10
         self.client = tes.HTTPClient(url, token=token)
-        self.remote_storage_url = remote_storage_url
+        self.uuid = runtime_context.str_uuid
+
+        # the remot storage url has the format <TES output path >/output_<uuid>
+        if remote_storage_url.startswith("s3://"):
+            self.remote_storage_url = os.path.dirname(remote_storage_url) \
+                + "/" + self.name
+        else:
+            self.remote_storage_url = remote_storage_url
+        # if the remote storage is s3 w edon't want any local directory,
+        # since it is not available to the AWS instances.
+        if urllib.parse.urlparse(self.remote_storage_url).scheme == "s3":
+            self.fs_access = S3FsAccess(self.basedir)
+            self.basedir = self.remote_storage_url
         self.token = token
 
     def get_container(self):
@@ -237,14 +301,23 @@ class TESTask(JobBase):
 
     def parse_listing(self, listing, inputs):
         for item in listing:
-
-            if "writable" in item:
+            if "writable" in item and item['writable'] is True:
                 raise UnsupportedRequirement(
                     "The TES spec does not allow for writable inputs"
                 )
 
             if "contents" in item:
                 loc = self.fs_access.join(self.tmpdir, item["basename"])
+                # need to copy the temporary file to s3
+                if (urllib.
+                        parse.
+                        urlparse(self.remote_storage_url).
+                        scheme) == 's3':
+                    loc = self.fs_access.join(
+                        self.remote_storage_url,
+                        item['basename'])
+
+                log.critical(" Location is set to {}". format(loc))
                 with self.fs_access.open(loc, "wb") as gen:
                     gen.write(item["contents"])
             else:
@@ -343,6 +416,22 @@ class TESTask(JobBase):
                 )
             )
 
+        def get_job_id(path):
+            rv = None
+            try:
+                m = re.search(self.uuid+"/(.*)", path)
+                rv = m.group(1)
+            except Exception:
+                rv = os.path.basename(path)
+            try:
+                if rv.startswith('/'):
+                    rv = rv[1:]
+                if rv.endswith('/'):
+                    rv = rv[:-1]
+            except Exception:
+                pass
+            return(rv)
+
         create_body = tes.Task(
             name=self.name,
             description=self.spec.get("doc", ""),
@@ -364,9 +453,11 @@ class TESTask(JobBase):
                 ram_gb=ram,
                 disk_gb=disk
             ),
-            tags={"CWLDocumentId": self.spec.get("id")}
+            tags={"CWLDocumentId": self.spec.get("id"),
+                  "tool_name": self.name,
+                  "job_id": get_job_id(self.remote_storage_url),
+                  "workflow_id": self.uuid}
         )
-
         return create_body
 
     def run(self,
