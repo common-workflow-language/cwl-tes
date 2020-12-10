@@ -155,12 +155,14 @@ def main(args=None):
 
     class CachingFtpFsAccess(FtpFsAccess):
         """Ensures that the FTP connection cache is shared."""
-        def __init__(self, basedir, insecure=False):
+        def __init__(self, basedir, insecure=False, weak_ciphers=False):
             super(CachingFtpFsAccess, self).__init__(
-                basedir, ftp_cache, insecure=insecure)
+                basedir, ftp_cache, insecure=insecure,
+                weak_ciphers=weak_ciphers)
 
     ftp_fs_access = CachingFtpFsAccess(
-        os.curdir, insecure=parsed_args.insecure)
+        os.curdir, insecure=parsed_args.insecure,
+        weak_ciphers=parsed_args.weak_ciphers)
     if parsed_args.remote_storage_url:
         parsed_args.remote_storage_url = ftp_fs_access.join(
             parsed_args.remote_storage_url, str(uuid.uuid4()))
@@ -417,6 +419,10 @@ def arg_parser():  # type: () -> argparse.ArgumentParser
     parser.add_argument("--token", type=str)
     parser.add_argument("--token-public-key", type=str,
                         default=DEFAULT_TOKEN_PUBLIC_KEY)
+    parser.add_argument("--weak_ciphers", action="store_true", help="Allow "
+                        "the use of less secure cipher sets when connecting "
+                        "over FTPS. Helpful for testing with older FTP "
+                        "servers, but should not be used in production.")
     envgroup = parser.add_mutually_exclusive_group()
     envgroup.add_argument(
         "--preserve-environment",

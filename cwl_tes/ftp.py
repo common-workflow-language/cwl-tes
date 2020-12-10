@@ -8,6 +8,7 @@ import logging
 import netrc
 import glob
 import os
+import ssl
 from typing import List, Text  # noqa F401 # pylint: disable=unused-import
 
 from six import PY2
@@ -37,11 +38,12 @@ def abspath(src, basedir):  # type: (Text, Text) -> Text
 class FtpFsAccess(StdFsAccess):
     """FTP access with upload."""
     def __init__(
-            self, basedir, cache=None, insecure=False):  # type: (Text) -> None
+            self, basedir, cache=None, insecure=False, weak_ciphers=False):
         super(FtpFsAccess, self).__init__(basedir)
         self.cache = cache or {}
         self.netrc = None
         self.insecure = insecure
+        self.weak_ciphers = weak_ciphers
         try:
             if 'HOME' in os.environ:
                 if os.path.exists(os.path.join(os.environ['HOME'], '.netrc')):
@@ -80,7 +82,10 @@ class FtpFsAccess(StdFsAccess):
             if (host, user, passwd) in self.cache:
                 if self.cache[(host, user, passwd)].pwd():
                     return self.cache[(host, user, passwd)]
-            ftp = ftplib.FTP_TLS()
+            ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            if self.weak_ciphers:
+                ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+            ftp = ftplib.FTP_TLS(context=ctx)
             ftp.set_debuglevel(1 if _logger.isEnabledFor(logging.DEBUG) else 0)
             ftp.connect(host)
             ftp.login(user, passwd, secure=not self.insecure)
